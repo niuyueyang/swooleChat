@@ -1,0 +1,309 @@
+服务端启动：
+/php/tp/thinkphp/server
+php http.php
+http://39.106.10.163:9598/live/login.html
+
+base文件夹下面是swoole基础业务代码
+application/common/lib/RedisMy.php 封装redis方法
+application/index/controller/Send.php 发送验证码，调用RedisMy.php
+application/common/task/Task.php 针对于http.php中的onTask函数，将相关任务处理放到此文件中，比如sendSms
+
+【注意为了解决缓存问题，在http.php中$_SERVER=[],$_POST=[],$_GET=[]，同时在接口中为了防止缓存，在http.php里面的onRequest函数中，
+定义$_POST['swooleData']=$_POST;$_POST['http_server']=$this->http;在接口函数中就可以使用$_POST['swooleData']['字段']取值，同时ajax定义
+url地址采用http://39.106.10.163:9598/?s=index/send/login形式，详情见thinkphp/server/http.php】
+
+【静态资源放到public/static目录下，在http.php中使用'enable_static_handler' => true,'document_root' => '/php/tp/public/static'加载html文件】
+
+1.  在http.php中通过$_POST['http_server']=$this->http，可以在Send.php中使用$_POST['http_server']->task($taskData)，这样传过去之后就可以
+    在http.php中调用onTask函数，处理相关事务
+
+2.  在onTask函数中，为了结构明确，在application/common/task/Task.php中封装相关任务处理函数，比如刚才在Send.php中发送验证码，此时通过以下代码：
+    $taskData=[
+                    'method'=>'sendSms',
+                    'data'=>[
+                        'phone'=>$phoneNum,
+                        'code'=>$code,
+                        'funAndOperate'=>$funAndOperate,
+                        'body'=>$body,
+                        'redis'=>$this->redis
+                    ]
+                ];
+    $_POST['http_server']->task($taskData);
+    将任务提交给http.php中onTask，在onTask中通过以下代码：
+    require __DIR__."/../../application/common/task/Task.php";
+    $obj=new \Task();
+    $method=$data['method'];
+    $flag=$obj->$method($data['data']);
+    将相关数据提交到application/common/task/Task.php，在里面通过sendSms将验证码发送，代码如下：
+    public function sendSms($data){
+            try{
+                $result = json_decode($this->postData($data['funAndOperate'], $data['body']));
+                if($result->respCode=='00000'){
+                    $data['redis']->set($data['redis']->smsKey($data['phone']), $data['code'], config('redis.out_time'));
+                }
+                else{
+                    return false;
+                }
+            }catch(\Exception $e){
+                return false;
+            }
+            return true;
+    }
+3. 复制http.php为ws.php，将里面的Http全部修改为Ws
+4.启用wx.php后，因为端口号是9599,所以网址通过http://39.106.10.163:9599/static/admin/live.html访问直播页面，另外ajax端口也改为9599
+5.提交文件采用move_uploaded_file原生方法，同时在wa.php里面设置
+    $_FILES = [];
+    if (isset($request->files)) {
+        foreach ($request->files as $key => $value) {
+            $_FILES[$key] = $value;
+        }
+    }
+6. 在detail.html里面设置websocket，live.js，在live.js里面设置如下代码：
+    var wsUrl='ws://39.106.10.163:9599';
+    var websocket=new WebSocket(wsUrl);
+    websocket.onopen=function (evt) {
+        console.log('connected success');
+    }
+    websocket.onmessage=function (evt) {
+        console.log(evt.data);
+    }
+    websocket.onclose=function (evt) {
+        console.log('close');
+    }
+    websocket.onerror=function (evt,e) {
+        console.log(evt.data);
+    }
+7. 在push接口里面，通过$_POST['http_server']->push(7,'hello swoole');将信息发送到websocket里面，live.js通过onmessage进行监听，这里的7是ws.php开启以后，监听端口号，必须一致
+8. 先将数据放到redis里面，通过ws.php onOpen函数，将$request->fd放到redis里面，哪个用户离开在onClose函数里面，对该用户对应的fd删除
+9. 在onOpen函数里面通过sadd方法，将数据存储到redis里面
+    $port = 6379;
+    $redis = new \Redis();
+    $redis->connect('127.0.0.1',$port, 300);
+    $redis->sadd('personId',$request->fd);
+
+    在onClose函数里面，清空redis里面离开的用户
+    $port = 6379;
+    $redis = new \Redis();
+    $redis->connect('127.0.0.1',$port, 300);
+    $redis->sRem('personId',$fd);
+    echo "{$fd} leave\n";
+10.在admin/controller/live.php里面的push函数里面，向连接的用户发送信息
+    $clients=$this->redis->sMembers('personId');
+    foreach ($clients as $val){
+        $_POST['http_server']->push($val,'hello swoole');
+    }
+11. 通过http://39.106.10.163:9599/static/admin/live.html输入信息，直播信息接口对应http://39.106.10.163:9599/?s=admin/live/push，
+    上传图片接口对应http://39.106.10.163:9599/?s=admin/image/index
+    在http://39.106.10.163:9599/static/live/detail.html页面实时展示直播信息
+12  http://39.106.10.163:9599/?s=admin/live/push进行封装传过来的数据格式，以下代码展示：
+    $teams=array(
+                1=>array(
+                    'name'=>'马刺',
+                    'logo'=>'/static/live/imgs/team1.png'
+                ),
+                4=>array(
+                    'name'=>'火箭',
+                    'logo'=>'/static/live/imgs/team2.png'
+                ),
+            );
+            $data=array(
+                'type'=>intval($_POST['swooleData']['type']),
+                'title'=>!empty($teams[$_POST['swooleData']['team_id']]['name'])?$teams[$_POST['swooleData']['team_id']]['name']:'直播员',
+                'logo'=>!empty($teams[$_POST['swooleData']['team_id']]['logo'])?'http://39.106.10.163:9599/'.$teams[$_POST['swooleData']['team_id']]['logo']:'',
+                'time'=>date('H:i:s'),
+                'content'=>!empty($_POST['swooleData']['content'])?$_POST['swooleData']['content']:'',
+                'image'=>!empty($_POST['swooleData']['image'])?$_POST['swooleData']['image']:'',
+            );
+            $clients=$this->redis->sMembers('personId');
+            foreach ($clients as $val){
+                $_POST['http_server']->push($val,json_encode($data));
+            }
+     前端通过/static/admin/live.html 通过ajax向后端传数据
+13.为了展示数据，在/static/live/js/live.js里面的omMessage方法里面，把后端传回来的数据展示出来，展示到/static/live/detail.html，其中live.js代码如下：
+    var wsUrl='ws://39.106.10.163:9599';
+    var websocket=new WebSocket(wsUrl);
+    websocket.onopen=function (evt) {
+        console.log('connected success');
+    }
+    websocket.onmessage=function (evt) {
+        push(JSON.parse(evt.data));
+        console.log(evt.data);
+    }
+    websocket.onclose=function (evt) {
+        console.log('close');
+    }
+    websocket.onerror=function (evt,e) {
+        console.log(evt.data);
+    }
+    function push(data){
+        var html='<div class="frame">\n' +
+            '<h3 class="frame-header">\n' +
+            '<i class="icon iconfont icon-shijian"></i>第'+data.type+'节 '+data.time+'\n' +
+            '</h3>\n' +
+            '<div class="frame-item">\n' +
+            '<span class="frame-dot"></span>\n' +
+            '<div class="frame-item-author">\n' +
+            '<img src="'+data.logo+'" width="20px" height="20px"> '+data.title+'\n' +
+            '</div>\n' +
+            '<p>'+data.content+'</p>\n' +
+            '</div>\n' +
+            '</div>';
+        $("#match-result").append(html);
+    }
+14. 在live/detail.html中引入chart-push.js文件，功能涉及到当点击enter键，发送信息到http://39.106.10.163:9599/?s=index/chart/index
+    $(function () {
+        $("#disuss-box").keydown(function (event) {
+            if(event.keyCode==13){
+                var text=$(this).val();
+                var url='http://39.106.10.163:9600/?s=index/chart/index';
+                var data={'content':text,'game_id':1};
+                $.post(url,data,function (result) {
+                    console.log(result)
+                    $(this).val('')
+                },'json')
+            }
+        })
+    })
+15 直播员直播与聊天暂时使用一个端口
+    wx.php设置跨域在onRequest方法内部 $response->header('Access-Control-Allow-Origin','*');
+16 live/detail.html引入chat-push.js
+   $(function () {
+       $("#disuss-box").keydown(function (event) {
+           if(event.keyCode==13){
+               var text=$(this).val();
+               var data={'content':text,'game_id':1};
+               $.ajax({
+                   url:'http://39.106.10.163:9599/?s=index/chart/index',
+                   data:data,
+                   method:'post',
+                   success:function (data) {
+                       console.log(data)
+                   },
+                   error:function (err) {
+                       console.log(err)
+                   }
+               })
+           }
+       })
+   })
+17. application/admin/controller/Live.php增加index方法
+    public function index()
+        {
+            if(empty($_POST['swooleData']['game_id'])){
+                return json_encode(array('code'=>1,'data'=>1,'msg'=>'game_id为空','data'=>array()));
+            }
+            if(empty($_POST['swooleData']['content'])){
+                return json_encode(array('code'=>1,'data'=>1,'msg'=>'content为空','data'=>array()));
+            }
+            $data=array(
+                'user'=>'user'.rand(0,2000),
+                'content'=>$_POST['swooleData']['content'],
+                'mType'=>'chat'
+            );
+            $clients=$this->redis->sMembers('personId');
+            foreach($_POST['http_server']->connection_list() as $fd)
+            {
+                if($_POST['http_server']->exist($fd)) {
+                    var_dump($fd);
+                    $_POST['http_server']->push($fd, json_encode($data));
+                }
+            }
+            return json_encode(array('code'=>0,'msg'=>'success'));
+        }
+18. detail.html中live.js修改为如下代码：
+    var wsUrl='ws://39.106.10.163:9599';
+    var websocket=new WebSocket(wsUrl);
+    websocket.onopen=function (evt) {
+        console.log('connected success');
+    }
+    websocket.onmessage=function (evt) {
+        // push(JSON.parse(evt.data));
+        console.log(evt.data);
+        $("#first").remove();
+        var data=JSON.parse(evt.data);
+        if(data.mType=='live'){
+            var html='<div class="frame">\n' +
+                '<h3 class="frame-header">\n' +
+                '<i class="icon iconfont icon-shijian"></i>第'+data.type+'节 '+data.time+'\n' +
+                '</h3>\n' +
+                '<div class="frame-item">\n' +
+                '<span class="frame-dot"></span>\n' +
+                '<div class="frame-item-author">\n' +
+                '<img src="'+data.logo+'" width="20px" height="20px"> '+data.title+'\n' +
+                '</div>\n' +
+                '<p>'+data.content+'</p>\n' +
+                '</div>\n' +
+                '</div>';
+            $("#match-result").append(html);
+        }
+        console.log(data.mType)
+       if(data.mType=='chat'){
+            console.log(222)
+            $("#second").remove();
+            var html='<div class="comment">\n' +
+                '<span>'+data.user+'</span>\n' +
+                '<span>'+data.content+'</span>\n' +
+                '</div>';
+            $("#comments").append(html);
+        }
+    }
+    websocket.onclose=function (evt) {
+        console.log('close');
+    }
+    websocket.onerror=function (evt,e) {
+        console.log(evt.data);
+    }
+19 【重要】在不同页面可以设置不同端口，避免使用同一端口，造成数据量过大
+    复制detail.html，改名为details.html，引入chart-pushs.js，lives.js，
+    在chart-pushs.js中请求接口http://39.106.10.163:9600/?s=index/chart/indexs，只是修改了url，其他不变，
+    【注意与上面不一样，端口号是9600，接口是s-index/chart/indexs】
+    在lives.js中，监听变为ws://39.106.10.163:9600，
+    在admin/controller/Live.php中，增加indexs方法，基本一致，就是redis取值变为personIds
+    public function indexs()
+        {
+            if(empty($_POST['swooleData']['game_id'])){
+                return json_encode(array('code'=>1,'data'=>1,'msg'=>'game_id为空','data'=>array()));
+            }
+            if(empty($_POST['swooleData']['content'])){
+                return json_encode(array('code'=>1,'data'=>1,'msg'=>'content为空','data'=>array()));
+            }
+            $data=array(
+                'user'=>'user'.rand(0,2000),
+                'content'=>$_POST['swooleData']['content'],
+                'mType'=>'chat'
+            );
+            $clients=$this->redis->sMembers('personIds');
+            foreach ($clients as $fd){
+                $_POST['http_server']->push($fd,json_encode($data));
+            }
+            //或者采用更高效写法
+            //foreach($_POST['http_server']->connection_list() as $fd)
+            //{
+             //   if($_POST['http_server']->exist($fd)) {
+              //      var_dump($fd);
+             //       $_POST['http_server']->push($fd, json_encode($data));
+              //  }
+            //}
+        }
+     复制ws.php为wss.php，监听端口变为9600，redis的key值均变为personIds，与上面不一样
+     这样通过http://39.106.10.163:9600/static/live/details.html，就可以保证9600与9599的url信息不冲突
+20 监控
+    1.监控php ws.php是否启动正常
+    //nohup /usr/bin/php /php/tp/thinkphp/server/script/server.php >  /php/tp/thinkphp/server/script/server.txt
+    class Server{
+        const PORT=9599;
+        public function port(){
+            $shell="netstat -anp 2>/dev/null | grep ".self::PORT.'| grep LISTEN | wc -l';
+            $result=shell_exec($shell);
+            if($result!=1){
+                //异常报警
+                echo date("Ymd H:i:s")."error".PHP_EOL;
+            }
+            else{
+                echo date("Ymd H:i:s")."success".PHP_EOL;
+            }
+        }
+    }
+    swoole_timer_tick(2000,function ($timer_id){
+        (new Server())->port();
+    });
